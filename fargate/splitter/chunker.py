@@ -151,7 +151,12 @@ class FileChunker:
         
         try:
             # Read header row
-            header_row = next(csv_reader)
+            try:
+                header_row = next(csv_reader)
+            except StopIteration:
+                # Empty file
+                return
+            
             self.header_row = ','.join(f'"{field}"' if ',' in field or '"' in field else field 
                                       for field in header_row)
             logger.info(f"CSV header: {len(header_row)} columns")
@@ -338,10 +343,10 @@ class FileChunker:
         # Join lines with newlines
         chunk_text = '\n'.join(lines) + '\n'
         
-        # GZIP compress
+        # GZIP compress - encode to bytes first, then compress
         buffer = io.BytesIO()
-        with gzip.GzipFile(fileobj=buffer, mode='wt', encoding='utf-8') as gzf:
-            gzf.write(chunk_text)
+        with gzip.GzipFile(fileobj=buffer, mode='wb') as gzf:
+            gzf.write(chunk_text.encode('utf-8'))
         
         compressed_data = buffer.getvalue()
         

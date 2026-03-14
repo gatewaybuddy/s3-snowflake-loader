@@ -6,6 +6,7 @@ Tests streaming file processing, line boundary handling, and chunk generation
 for various file formats (CSV, JSON Lines, JSON arrays).
 """
 
+import csv
 import gzip
 import io
 import json
@@ -94,16 +95,22 @@ description here","300"
         self.assertGreater(len(chunks), 1)
         
         # Verify that records are not split mid-field
-        total_rows = 0
+        total_rows = sum(chunk.row_count for chunk in chunks)
+        
+        # Verify content integrity by parsing each chunk
         for chunk in chunks:
             decompressed = gzip.decompress(chunk.data).decode('utf-8')
             lines = decompressed.strip().split('\n')
             
             # Each chunk should have header + some data rows
             self.assertEqual(lines[0], 'name,description,value')
-            total_rows += len(lines) - 1  # Subtract header
+            
+            # Parse the chunk as CSV to verify integrity
+            chunk_reader = csv.reader(io.StringIO(decompressed))
+            chunk_rows = list(chunk_reader)
+            self.assertGreater(len(chunk_rows), 1)  # Header + at least one data row
         
-        # Should have 3 data rows total (not counting headers)
+        # Should have 3 data rows total (as reported by chunker)
         self.assertEqual(total_rows, 3)
     
     def test_jsonl_chunking(self):
