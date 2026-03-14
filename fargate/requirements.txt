@@ -1,0 +1,20 @@
+# AWS SDK
+boto3>=1.28.0,<2.0.0
+
+# PGP encryption support
+python-gnupg>=0.5.0,<0.6.0
+
+# Snowflake connector (optional - only if executing COPY INTO from Fargate)
+snowflake-connector-python>=3.5.0,<4.0.0
+
+# Cryptography for enhanced security
+cryptography>=41.0.0,<42.0.0
+
+# Standard library extras (usually included but explicit for clarity)
+# These are typically part of Python stdlib but listing for completeness
+# - json (stdlib)
+# - gzip (stdlib) 
+# - csv (stdlib)
+# - hashlib (stdlib)
+# - threading (stdlib)
+# - subprocess (stdlib)

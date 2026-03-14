@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Fargate infrastructure for S3-Snowflake large file processing'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: s3-snowflake-loader
+    Description: Project name used for resource naming
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where Fargate tasks will run
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for Fargate tasks (recommend private subnets with NAT gateway)
+  
+  S3BucketArn:
+    Type: String
+    Description: ARN of the S3 bucket containing files to process
+  
+  SecretsManagerRegion:
+    Type: String
+    Default: !Ref 'AWS::Region'
+    Description: AWS region where Secrets Manager secrets are stored
+  
+  SnowflakeSecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing Snowflake connection config
+  
+  PGPSecretArn:
+    Type: String
+    Description: ARN of Secrets Manager secret containing PGP private key (optional)
+    Default: ''
+
+Resources:
+  # ECR Repository for Fargate container image
+  FargateECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-fargate-splitter'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Security Group for Fargate tasks
+  FargateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Fargate S3-Snowflake processing tasks
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for AWS APIs and Snowflake
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS over TCP
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS over UDP
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-fargate-sg'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Group for Fargate tasks
+  FargateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${ProjectName}-fargate-splitter'
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for Fargate task execution
+  FargateExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-fargate-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt FargateECRRepository.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for Fargate task (application permissions)
+  FargateTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-fargate-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref S3BucketArn
+                  - !Sub '${S3BucketArn}/*'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref SnowflakeSecretArn
+                  - !If
+                    - HasPGPSecret
+                    - !Ref PGPSecretArn
+                    - !Ref 'AWS::NoValue'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub '${FargateLogGroup}:*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ECS Cluster
+  FargateCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-fargate-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ECS Task Definition
+  FargateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-fargate-splitter'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '4096'  # 4 vCPUs
+      Memory: '8192'  # 8GB
+      ExecutionRoleArn: !GetAtt FargateExecutionRole.Arn
+      TaskRoleArn: !GetAtt FargateTaskRole.Arn
+      EphemeralStorage:
+        SizeInGiB: 20  # 20GB for temporary file processing
+      ContainerDefinitions:
+        - Name: fargate-splitter
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${FargateECRRepository}:latest'
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FargateLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref 'AWS::Region'
+          # Environment variables will be overridden by Lambda when running tasks
+          # This is just the base configuration
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for Lambda to invoke Fargate
+  LambdaFargateInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-fargate-invoke-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: FargateInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - ecs:StopTask
+                Resource:
+                  - !Ref FargateTaskDefinition
+                  - !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/${FargateCluster}/*'
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeClusters
+                Resource: !GetAtt FargateCluster.Arn
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !GetAtt FargateExecutionRole.Arn
+                  - !GetAtt FargateTaskRole.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+Conditions:
+  HasPGPSecret: !Not [!Equals [!Ref PGPSecretArn, '']]
+
+Outputs:
+  ClusterArn:
+    Description: ARN of the ECS Fargate cluster
+    Value: !GetAtt FargateCluster.Arn
+    Export:
+      Name: !Sub '${ProjectName}-fargate-cluster-arn'
+
+  TaskDefinitionArn:
+    Description: ARN of the Fargate task definition
+    Value: !Ref FargateTaskDefinition
+    Export:
+      Name: !Sub '${ProjectName}-fargate-task-definition-arn'
+
+  SecurityGroupId:
+    Description: Security group ID for Fargate tasks
+    Value: !Ref FargateSecurityGroup
+    Export:
+      Name: !Sub '${ProjectName}-fargate-security-group-id'
+
+  ECRRepositoryUri:
+    Description: URI of the ECR repository for container images
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${FargateECRRepository}'
+    Export:
+      Name: !Sub '${ProjectName}-ecr-repository-uri'
+
+  LambdaRoleArn:
+    Description: IAM role ARN for Lambda to invoke Fargate
+    Value: !GetAtt LambdaFargateInvokeRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-lambda-fargate-role-arn'
+
+  LogGroupName:
+    Description: CloudWatch log group name for Fargate tasks
+    Value: !Ref FargateLogGroup
+    Export:
+      Name: !Sub '${ProjectName}-fargate-log-group-name'
+
+  RequiredEnvironmentVariables:
+    Description: Environment variables needed for Lambda configuration
+    Value: !Sub |
+      FARGATE_CLUSTER_ARN=${FargateCluster.Arn}
+      FARGATE_TASK_DEFINITION_ARN=${FargateTaskDefinition}
+      FARGATE_SUBNET_IDS=${SubnetIds}
+      FARGATE_SECURITY_GROUP_IDS=${FargateSecurityGroup}
+      FARGATE_SIZE_THRESHOLD=5368709120
+      PGP_FARGATE_THRESHOLD=1073741824
+      FARGATE_CHUNK_SIZE_MB=1024
+      FARGATE_EXECUTE_COPY_INTO=false

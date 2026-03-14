@@ -159,7 +159,51 @@ def _process_record(record: dict, s3_prefix: str, context) -> dict:
     for warning in validation.warnings:
         logger.warning(f"Validation warning for {key}: {warning}")
 
-    # 5b. PGP decryption (if detected)
+    # 5b. Check if file should be processed by Fargate
+    fargate_threshold_bytes = int(os.environ.get("FARGATE_SIZE_THRESHOLD", "5368709120"))  # 5GB default
+    
+    should_use_fargate = False
+    fargate_reason = None
+    
+    # Check file size threshold
+    if size >= fargate_threshold_bytes:
+        should_use_fargate = True
+        fargate_reason = f"file size ({size / (1024**3):.1f}GB) exceeds threshold ({fargate_threshold_bytes / (1024**3):.1f}GB)"
+    
+    # Check if PGP encrypted AND large (configurable threshold for PGP files)
+    elif validation.is_pgp_encrypted:
+        pgp_threshold_bytes = int(os.environ.get("PGP_FARGATE_THRESHOLD", "1073741824"))  # 1GB default for PGP files
+        if size >= pgp_threshold_bytes:
+            should_use_fargate = True
+            fargate_reason = f"PGP-encrypted file ({size / (1024**2):.1f}MB) exceeds PGP threshold ({pgp_threshold_bytes / (1024**2):.1f}MB)"
+    
+    # Special handling for chunks directory (ignore individual chunks and markers)
+    if "/_chunks/" in key:
+        if key.endswith("_COMPLETE"):
+            logger.info(f"Fargate completion marker detected: {key}")
+            return _handle_fargate_completion(bucket, key, parsed, config, load_record)
+        elif key.endswith("_FAILED"):
+            logger.info(f"Fargate failure marker detected: {key}")
+            return _handle_fargate_failure(bucket, key, parsed, config, load_record)
+        elif key.endswith(".json") and "_manifest.json" in key:
+            logger.info(f"Skipping Fargate manifest file: {key}")
+            return {"status": "SKIPPED", "s3_key": key, "reason": "fargate manifest file"}
+        else:
+            logger.info(f"Skipping individual Fargate chunk: {key}")
+            return {"status": "SKIPPED", "s3_key": key, "reason": "individual fargate chunk"}
+    
+    # Trigger Fargate if needed
+    if should_use_fargate:
+        logger.info(f"Triggering Fargate processing: {fargate_reason}")
+        try:
+            fargate_result = _trigger_fargate_task(bucket, key, config, parsed, load_record)
+            return fargate_result
+        except Exception as e:
+            logger.error(f"Failed to trigger Fargate task: {e}")
+            # Fall through to Lambda processing as fallback
+            logger.warning("Attempting Lambda processing as fallback...")
+
+    # 5c. PGP decryption (if detected)
     decrypted_path = None
     if validation.is_pgp_encrypted:
         try:
@@ -489,3 +533,268 @@ def _read_s3_head_text(bucket: str, key: str, bytes_count: int = 8192) -> str:
         return head.decode("utf-8-sig")
     except UnicodeDecodeError:
         return head.decode("latin-1", errors="replace")
+
+
+def _trigger_fargate_task(bucket: str, key: str, config, parsed, load_record) -> dict:
+    """
+    Trigger Fargate task to process large/PGP-encrypted files.
+    
+    Returns immediately after task starts - does not wait for completion.
+    """
+    ecs_client = boto3.client('ecs')
+    
+    # Get Fargate configuration from environment
+    fargate_cluster = os.environ.get("FARGATE_CLUSTER_ARN")
+    fargate_task_definition = os.environ.get("FARGATE_TASK_DEFINITION_ARN")
+    fargate_subnet_ids = os.environ.get("FARGATE_SUBNET_IDS", "").split(",")
+    fargate_security_group_ids = os.environ.get("FARGATE_SECURITY_GROUP_IDS", "").split(",")
+    
+    if not all([fargate_cluster, fargate_task_definition, fargate_subnet_ids]):
+        raise ValueError(
+            "Fargate configuration missing. Required: FARGATE_CLUSTER_ARN, "
+            "FARGATE_TASK_DEFINITION_ARN, FARGATE_SUBNET_IDS"
+        )
+    
+    # Prepare task environment
+    task_env = {
+        "S3_BUCKET": bucket,
+        "S3_KEY": key,
+        "CHUNK_SIZE_MB": os.environ.get("FARGATE_CHUNK_SIZE_MB", "1024"),
+        "SECRET_NAME": os.environ.get("SECRET_NAME"),
+        "PGP_SECRET_NAME": os.environ.get("PGP_SECRET_NAME", ""),
+        "EXECUTE_COPY_INTO": os.environ.get("FARGATE_EXECUTE_COPY_INTO", "false"),
+    }
+    
+    # Convert to ECS task environment format
+    task_env_list = [
+        {"name": k, "value": v} 
+        for k, v in task_env.items() 
+        if v  # Only include non-empty values
+    ]
+    
+    # Network configuration
+    network_config = {
+        "awsvpcConfiguration": {
+            "subnets": [s.strip() for s in fargate_subnet_ids if s.strip()],
+            "assignPublicIp": "ENABLED"  # Needed for S3 access if no NAT Gateway
+        }
+    }
+    
+    if fargate_security_group_ids[0]:  # Check if security groups provided
+        network_config["awsvpcConfiguration"]["securityGroups"] = [
+            s.strip() for s in fargate_security_group_ids if s.strip()
+        ]
+    
+    try:
+        # Start Fargate task
+        response = ecs_client.run_task(
+            cluster=fargate_cluster,
+            taskDefinition=fargate_task_definition,
+            launchType="FARGATE",
+            platformVersion="LATEST",
+            networkConfiguration=network_config,
+            overrides={
+                "containerOverrides": [
+                    {
+                        "name": "fargate-splitter",  # Must match container name in task definition
+                        "environment": task_env_list
+                    }
+                ]
+            },
+            tags=[
+                {"key": "SourceBucket", "value": bucket},
+                {"key": "SourceKey", "value": key},
+                {"key": "TargetTable", "value": parsed.table_name},
+                {"key": "LoadId", "value": load_record.load_id},
+                {"key": "LambdaFunction", "value": load_record.lambda_function},
+            ]
+        )
+        
+        # Get task ARN
+        task_arn = response["tasks"][0]["taskArn"] if response["tasks"] else None
+        
+        if not task_arn:
+            raise ValueError("Failed to start Fargate task - no task ARN returned")
+        
+        logger.info(f"Fargate task started: {task_arn}")
+        
+        # Update load record to track Fargate processing
+        load_record.status = "PROCESSING_FARGATE"
+        load_record.error_message = f"Processing by Fargate task: {task_arn}"
+        
+        # Log to Snowflake history
+        client = SnowflakeClient(config)
+        with client.connect():
+            history = HistoryLogger(client._conn, config.admin_database, config.admin_schema)
+            history.insert_loading(load_record)
+            history.update_complete(load_record)
+        
+        return {
+            "status": "FARGATE_TRIGGERED",
+            "s3_key": key,
+            "table": parsed.table_name,
+            "fargate_task_arn": task_arn,
+            "load_id": load_record.load_id,
+            "message": "Large file processing delegated to Fargate"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to start Fargate task: {e}")
+        raise ValueError(f"Fargate task creation failed: {e}") from e
+
+
+def _handle_fargate_completion(bucket: str, marker_key: str, parsed, config, load_record) -> dict:
+    """
+    Handle Fargate _COMPLETE marker by executing COPY INTO from chunks.
+    
+    Called when Lambda detects a _COMPLETE marker in the _chunks/ directory.
+    """
+    logger.info(f"Processing Fargate completion marker: {marker_key}")
+    
+    # Parse chunks prefix from marker key
+    # e.g., "data/table1/_chunks/_COMPLETE" -> "data/table1/_chunks"
+    chunks_prefix = marker_key.rsplit('/', 1)[0]
+    
+    try:
+        # Read completion marker for metadata
+        marker_response = s3_client.get_object(Bucket=bucket, Key=marker_key)
+        marker_data = json.loads(marker_response['Body'].read().decode('utf-8'))
+        
+        expected_rows = marker_data.get('total_rows', 0)
+        total_chunks = marker_data.get('chunks_created', 0)
+        
+        logger.info(
+            f"Fargate completion details: {total_chunks} chunks, {expected_rows:,} total rows"
+        )
+        
+        # Execute COPY INTO from all chunks
+        client = SnowflakeClient(config)
+        with client.connect():
+            history = HistoryLogger(client._conn, config.admin_database, config.admin_schema)
+            
+            # Log initial LOADING status for the COPY operation
+            load_record.status = "LOADING"
+            load_record.error_message = f"Loading from Fargate chunks: {chunks_prefix}"
+            history.insert_loading(load_record)
+            
+            try:
+                # Check/create table if needed (same logic as normal Lambda)
+                if not client.table_exists(parsed.table_name):
+                    logger.info(f"Creating table {parsed.table_name} for Fargate chunks")
+                    # For Fargate chunks, we assume CSV format
+                    # Read manifest to get more details if needed
+                    client.create_table_for_csv_chunks(parsed.table_name)
+                
+                # Execute COPY INTO with pattern to match only chunk files
+                copy_result = client.copy_into(
+                    table_name=parsed.table_name,
+                    s3_relative_path=f"{chunks_prefix}/",
+                    file_format="CSV",
+                    compression="GZIP", 
+                    copy_options={
+                        "PATTERN": "chunk-.*\\.csv\\.gz"  # Only process chunk files
+                    }
+                )
+                
+                # Update load record
+                load_record.rows_loaded = copy_result["rows_loaded"]
+                load_record.rows_parsed = copy_result["rows_parsed"]
+                load_record.errors_seen = copy_result["errors_seen"]
+                load_record.copy_into_query_id = copy_result["query_id"]
+                load_record.status = copy_result["status"]
+                
+                # Check row count matches Fargate processing
+                if abs(load_record.rows_loaded - expected_rows) > expected_rows * 0.01:  # 1% tolerance
+                    logger.warning(
+                        f"Row count mismatch: Fargate reported {expected_rows}, "
+                        f"COPY INTO loaded {load_record.rows_loaded}"
+                    )
+                
+                history.update_complete(load_record)
+                
+                logger.info(
+                    f"Fargate COPY complete: {load_record.rows_loaded:,} rows loaded "
+                    f"from {total_chunks} chunks"
+                )
+                
+                return {
+                    "status": load_record.status,
+                    "s3_key": marker_key,
+                    "table": parsed.table_name,
+                    "rows_loaded": load_record.rows_loaded,
+                    "chunks_processed": total_chunks,
+                    "fargate_chunks_prefix": chunks_prefix,
+                    "load_id": load_record.load_id
+                }
+                
+            except Exception as e:
+                load_record.status = "FAILED"
+                load_record.error_message = f"Fargate COPY INTO failed: {str(e)[:4000]}"
+                history.update_complete(load_record)
+                raise
+    
+    except Exception as e:
+        logger.error(f"Failed to process Fargate completion: {e}")
+        return {
+            "status": "FAILED",
+            "s3_key": marker_key,
+            "error": f"Fargate completion processing failed: {e}",
+            "load_id": load_record.load_id
+        }
+
+
+def _handle_fargate_failure(bucket: str, marker_key: str, parsed, config, load_record) -> dict:
+    """
+    Handle Fargate _FAILED marker by logging the failure and sending notifications.
+    """
+    logger.error(f"Fargate processing failed: {marker_key}")
+    
+    try:
+        # Read failure marker for error details
+        marker_response = s3_client.get_object(Bucket=bucket, Key=marker_key)
+        failure_data = json.loads(marker_response['Body'].read().decode('utf-8'))
+        
+        error_message = failure_data.get('error', 'Unknown Fargate error')
+        failed_at = failure_data.get('failed_at', 'Unknown time')
+        
+        logger.error(f"Fargate failure details: {error_message} (at {failed_at})")
+        
+        # Log failure to Snowflake
+        load_record.status = "FAILED"
+        load_record.error_message = f"Fargate processing failed: {error_message}"
+        
+        client = SnowflakeClient(config)
+        with client.connect():
+            history = HistoryLogger(client._conn, config.admin_database, config.admin_schema)
+            history.insert_loading(load_record)
+            history.update_complete(load_record)
+            
+            # Send failure notification
+            try:
+                notify_failure(
+                    s3_key=marker_key,
+                    table=parsed.table_name,
+                    database=config.database,
+                    error_message=f"Fargate processing failed: {error_message}",
+                    load_id=load_record.load_id,
+                )
+            except Exception as notif_err:
+                logger.error(f"Failed to send Fargate failure notification: {notif_err}")
+        
+        return {
+            "status": "FAILED",
+            "s3_key": marker_key,
+            "table": parsed.table_name,
+            "error": f"Fargate processing failed: {error_message}",
+            "failed_at": failed_at,
+            "load_id": load_record.load_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to process Fargate failure marker: {e}")
+        return {
+            "status": "FAILED",
+            "s3_key": marker_key,
+            "error": f"Failed to read Fargate failure details: {e}",
+            "load_id": load_record.load_id
+        }
