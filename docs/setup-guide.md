@@ -10,6 +10,7 @@ Complete guide for deploying the event-driven ETL pipeline from S3 to Snowflake.
 
 ### Prerequisites
 - Infrastructure is already deployed (AWS Lambda, Snowflake objects, S3 bucket)
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) installed and configured (`aws configure`)
 - You just want to use the pipeline, not deploy it from scratch
 
 ### Steps
@@ -26,7 +27,6 @@ Complete guide for deploying the event-driven ETL pipeline from S3 to Snowflake.
 ### Folder Convention (Quick Reference)
 - `.T` = **Truncate** (delete all rows, then load) — default if no suffix
 - `.A` = **Append** (add rows to existing table)  
-- `.M` = **Merge** (upsert based on configured merge keys)
 
 Example paths:
 - `analytics/SALES.T/daily-revenue.csv` → truncate and reload SALES table
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS ADMIN_DB._PIPELINE.LOAD_HISTORY (
     TARGET_DATABASE     VARCHAR(128)    NOT NULL,
     TARGET_SCHEMA       VARCHAR(128)    NOT NULL,
     TARGET_TABLE        VARCHAR(128)    NOT NULL,
-    LOAD_MODE           VARCHAR(10)     NOT NULL,       -- TRUNCATE | APPEND | MERGE
+    LOAD_MODE           VARCHAR(10)     NOT NULL,       -- TRUNCATE | APPEND
     TABLE_CREATED       BOOLEAN         DEFAULT FALSE,
     FILE_FORMAT_USED    VARCHAR(4000),
     ROWS_LOADED         NUMBER,
@@ -248,7 +248,7 @@ CREATE TABLE IF NOT EXISTS ADMIN_DB._PIPELINE.LOAD_HISTORY (
 **Key columns:**
 - `LOAD_ID` — Auto-generated UUID, primary key
 - `STATUS` — Lifecycle: `LOADING` → `SUCCESS` / `PARTIAL` / `FAILED`
-- `LOAD_MODE` — Determined by folder suffix (`.T`, `.A`, `.M`)
+- `LOAD_MODE` — Determined by folder suffix (`.T`, `.A`)
 - `DURATION_SECONDS` — Computed by Lambda after COPY INTO completes
 
 ### 2.3 Load Errors Table
@@ -657,7 +657,7 @@ s3://<bucket>/<prefix>/<TABLE_NAME>.<MODE>/filename.ext
 | `<bucket>` | S3 bucket | `etl-loader-test-pickybat` |
 | `<prefix>` | Routes to a database (configured in `config.yaml`) | `analytics/` |
 | `<TABLE_NAME>` | Becomes the Snowflake table name (uppercased) | `DAILY_REVENUE` |
-| `<MODE>` | Load mode suffix | `.T`, `.A`, `.M` |
+| `<MODE>` | Load mode suffix | `.T`, `.A` |
 | `filename.ext` | Any filename; extension determines format | `2024-01-15.csv` |
 
 ### Load Modes
@@ -666,7 +666,6 @@ s3://<bucket>/<prefix>/<TABLE_NAME>.<MODE>/filename.ext
 |---|---|---|
 | `.T` (or none) | TRUNCATE | Delete all rows, then load. **Default.** |
 | `.A` | APPEND | Add rows to existing data |
-| `.M` | MERGE | Upsert based on merge keys (from control table) |
 
 ### Supported File Formats
 
@@ -850,7 +849,6 @@ If a match is found, the `DUPLICATE_OF` column in LOAD_HISTORY is set to the ori
 |---|---|---|
 | **TRUNCATE** (`.T`) | Proceed normally | TRUNCATE is inherently idempotent — the table is wiped and reloaded, so loading the same file twice produces the same result. |
 | **APPEND** (`.A`) | Proceed with WARNING | APPEND will create duplicate rows if the same file is loaded twice. The loader proceeds but logs a `WARNING` and marks `DUPLICATE_OF` in LOAD_HISTORY. Operators should review duplicates. |
-| **MERGE** (`.M`) | Proceed normally | MERGE is naturally idempotent — upsert logic means the same data applied twice produces the same final state. |
 
 ### LOAD_HISTORY Schema Addition
 
