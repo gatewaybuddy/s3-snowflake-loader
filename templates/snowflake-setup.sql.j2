@@ -1,0 +1,172 @@
+{# ─────────────────────────────────────────────────────────────
+   S3 → Snowflake Loader: Snowflake DDL Setup
+   Parameterized Jinja2 template — rendered by generate.py
+
+   Variables:
+     snowflake.account           — Snowflake account identifier
+     snowflake.admin_database    — Admin DB name (default: ADMIN_DB)
+     snowflake.admin_schema      — Admin schema (default: _PIPELINE)
+     snowflake.warehouse         — Loading warehouse name
+     aws.s3_bucket               — S3 bucket name
+     aws.account_id              — AWS account ID
+     naming.integration_prefix   — Prefix for storage integrations
+     naming.stage_name           — Stage name within each DB schema
+     naming.lambda_prefix        — Prefix for Lambda/role names
+     databases[]                 — List of database configs:
+       .name, .schema, .s3_prefix, .service_user, .role, .public_key_body
+   ───────────────────────────────────────────────────────────── #}
+-- =============================================================
+-- S3 → Snowflake Loader: Snowflake Setup
+-- Generated for account: {{ snowflake.account }}
+-- Generated at: {{ generated_at | default('(manual)') }}
+--
+-- Run this as ACCOUNTADMIN or equivalent.
+-- Review each section before executing.
+-- =============================================================
+
+-- ─── 1. Admin Database & Pipeline Tables ────────────────────
+
+CREATE DATABASE IF NOT EXISTS {{ snowflake.admin_database }};
+CREATE SCHEMA IF NOT EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }};
+
+-- Load history: one row per COPY INTO operation
+CREATE TABLE IF NOT EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.LOAD_HISTORY (
+    LOAD_ID             VARCHAR(36)     DEFAULT UUID_STRING(),
+    S3_BUCKET           VARCHAR(256)    NOT NULL,
+    S3_KEY              VARCHAR(1024)   NOT NULL,
+    S3_SIZE_BYTES       NUMBER,
+    S3_ETAG             VARCHAR(256),
+    TARGET_DATABASE     VARCHAR(128)    NOT NULL,
+    TARGET_SCHEMA       VARCHAR(128)    NOT NULL,
+    TARGET_TABLE        VARCHAR(128)    NOT NULL,
+    LOAD_MODE           VARCHAR(10)     NOT NULL,
+    TABLE_CREATED       BOOLEAN         DEFAULT FALSE,
+    FILE_FORMAT_USED    VARCHAR(4000),
+    ROWS_LOADED         NUMBER,
+    ROWS_PARSED         NUMBER,
+    ERRORS_SEEN         NUMBER          DEFAULT 0,
+    STATUS              VARCHAR(20)     NOT NULL,
+    ERROR_MESSAGE       VARCHAR(4000),
+    COPY_INTO_QUERY_ID  VARCHAR(256),
+    LAMBDA_REQUEST_ID   VARCHAR(256),
+    LAMBDA_FUNCTION     VARCHAR(256),
+    STARTED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    COMPLETED_AT        TIMESTAMP_NTZ,
+    DURATION_SECONDS    NUMBER,
+    PRIMARY KEY (LOAD_ID)
+);
+
+-- Rejected records from COPY INTO
+CREATE TABLE IF NOT EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.LOAD_ERRORS (
+    ERROR_ID            VARCHAR(36)     DEFAULT UUID_STRING(),
+    LOAD_ID             VARCHAR(36)     NOT NULL,
+    TARGET_DATABASE     VARCHAR(128)    NOT NULL,
+    S3_KEY              VARCHAR(1024)   NOT NULL,
+    ERROR_LINE          NUMBER,
+    ERROR_COLUMN        NUMBER,
+    ERROR_MESSAGE       VARCHAR(4000),
+    REJECTED_RECORD     VARCHAR(16777216),
+    CREATED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Notification audit trail: who was told what, when
+CREATE TABLE IF NOT EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.NOTIFICATIONS (
+    NOTIFICATION_ID     VARCHAR(36)     DEFAULT UUID_STRING(),
+    LOAD_ID             VARCHAR(36)     NOT NULL,
+    NOTIFICATION_TYPE   VARCHAR(20)     NOT NULL,
+    CHANNEL             VARCHAR(50)     NOT NULL,
+    RECIPIENT           VARCHAR(256),
+    MESSAGE_SUBJECT     VARCHAR(256),
+    MESSAGE_BODY        VARCHAR(16777216),
+    SENT_AT             TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    DELIVERY_STATUS     VARCHAR(20)     NOT NULL,
+    SNS_MESSAGE_ID      VARCHAR(256),
+    PRIMARY KEY (NOTIFICATION_ID)
+);
+
+-- Per-table load overrides
+CREATE TABLE IF NOT EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.CONTROL_TABLE (
+    TARGET_DATABASE     VARCHAR(128)    NOT NULL,
+    TARGET_SCHEMA       VARCHAR(128)    NOT NULL,
+    TARGET_TABLE        VARCHAR(128)    NOT NULL,
+    LOAD_MODE           VARCHAR(10)     DEFAULT NULL,
+    FILE_FORMAT_NAME    VARCHAR(256)    DEFAULT NULL,
+    FILE_FORMAT_OPTIONS VARCHAR(4000)   DEFAULT NULL,
+    COPY_OPTIONS        VARCHAR(4000)   DEFAULT NULL,
+    PRE_LOAD_SQL        VARCHAR(4000)   DEFAULT NULL,
+    POST_LOAD_SQL       VARCHAR(4000)   DEFAULT NULL,
+    MERGE_KEYS          VARCHAR(1000)   DEFAULT NULL,
+    AUTO_CREATE_TABLE   BOOLEAN         DEFAULT TRUE,
+    CREATE_TABLE_DDL    VARCHAR(16777216) DEFAULT NULL,
+    ENABLED             BOOLEAN         DEFAULT TRUE,
+    NOTES               VARCHAR(2000)   DEFAULT NULL,
+    CREATED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT          TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (TARGET_DATABASE, TARGET_SCHEMA, TARGET_TABLE)
+);
+
+-- ─── 2. Loading Warehouse ─────────────────────────────────────
+
+CREATE WAREHOUSE IF NOT EXISTS {{ snowflake.warehouse }}
+    WAREHOUSE_SIZE = 'XSMALL'
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+{% for db in databases %}
+-- ─── 3{{ loop.index0 | string }}. Database: {{ db.name }} ──────────────────────────────────
+{%- set db_name = db.name | upper %}
+{%- set schema = db.schema | upper %}
+{%- set role = db.role %}
+{%- set user = db.service_user %}
+{%- set int_name = naming.integration_prefix ~ '_' ~ db_name %}
+{%- set stage_name = naming.stage_name %}
+
+CREATE DATABASE IF NOT EXISTS {{ db_name }};
+CREATE SCHEMA IF NOT EXISTS {{ db_name }}.{{ schema }};
+
+-- Role: {{ role }}
+CREATE ROLE IF NOT EXISTS {{ role }};
+GRANT USAGE ON WAREHOUSE {{ snowflake.warehouse }} TO ROLE {{ role }};
+
+-- Target database grants
+GRANT USAGE ON DATABASE {{ db_name }} TO ROLE {{ role }};
+GRANT USAGE ON SCHEMA {{ db_name }}.{{ schema }} TO ROLE {{ role }};
+GRANT CREATE TABLE ON SCHEMA {{ db_name }}.{{ schema }} TO ROLE {{ role }};
+GRANT SELECT, INSERT, TRUNCATE ON ALL TABLES IN SCHEMA {{ db_name }}.{{ schema }} TO ROLE {{ role }};
+GRANT SELECT, INSERT, TRUNCATE ON FUTURE TABLES IN SCHEMA {{ db_name }}.{{ schema }} TO ROLE {{ role }};
+
+-- Admin database grants (logging)
+GRANT USAGE ON DATABASE {{ snowflake.admin_database }} TO ROLE {{ role }};
+GRANT USAGE ON SCHEMA {{ snowflake.admin_database }}.{{ snowflake.admin_schema }} TO ROLE {{ role }};
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA {{ snowflake.admin_database }}.{{ snowflake.admin_schema }} TO ROLE {{ role }};
+
+-- Service user: {{ user }} (RSA key auth — no password)
+CREATE USER IF NOT EXISTS {{ user }}
+    RSA_PUBLIC_KEY = '{{ db.public_key_body }}'
+    DEFAULT_ROLE = {{ role }}
+    DEFAULT_WAREHOUSE = {{ snowflake.warehouse }}
+    MUST_CHANGE_PASSWORD = FALSE;
+GRANT ROLE {{ role }} TO USER {{ user }};
+
+-- Storage integration (update STORAGE_AWS_ROLE_ARN after CloudFormation deploy)
+CREATE STORAGE INTEGRATION IF NOT EXISTS {{ int_name }}
+    TYPE = EXTERNAL_STAGE
+    STORAGE_PROVIDER = 'S3'
+    ENABLED = TRUE
+    STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::{{ aws.account_id }}:role/{{ naming.lambda_prefix }}-{{ db_name | lower | replace('_', '-') }}-snowflake-role'
+    STORAGE_ALLOWED_LOCATIONS = ('s3://{{ aws.s3_bucket }}/{{ db.s3_prefix }}');
+
+-- After creating the integration, run:
+-- DESC INTEGRATION {{ int_name }};
+-- Copy STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID
+-- into the CloudFormation parameters for cross-account trust.
+
+-- External stage
+GRANT CREATE STAGE ON SCHEMA {{ db_name }}.{{ schema }} TO ROLE {{ role }};
+CREATE OR REPLACE STAGE {{ db_name }}.{{ schema }}.{{ stage_name }}
+    URL = 's3://{{ aws.s3_bucket }}/{{ db.s3_prefix }}'
+    STORAGE_INTEGRATION = {{ int_name }};
+GRANT USAGE ON STAGE {{ db_name }}.{{ schema }}.{{ stage_name }} TO ROLE {{ role }};
+
+{% endfor %}

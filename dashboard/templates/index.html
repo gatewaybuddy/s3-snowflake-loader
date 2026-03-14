@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETL Pipeline Dashboard</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-hover: #22263a;
+            --border: #2a2e3f;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #4f8cff;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --partial: #fb923c;
+            --loading: #818cf8;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+        }
+
+        /* ─── Header ──────────────────────────────────── */
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+        }
+
+        header h1 span {
+            color: var(--accent);
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .refresh-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ─── Layout ──────────────────────────────────── */
+        main {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px 32px;
+        }
+
+        /* ─── Health Cards ────────────────────────────── */
+        .health-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .health-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        .health-card .label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .health-card .value {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .health-card .sub {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .value.success { color: var(--success); }
+        .value.warning { color: var(--warning); }
+        .value.danger  { color: var(--danger); }
+        .value.accent  { color: var(--accent); }
+
+        /* ─── Table ───────────────────────────────────── */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .section-header h2 {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .table-container {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        thead th {
+            text-align: left;
+            padding: 12px 14px;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        tbody tr {
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        tbody tr:hover {
+            background: var(--surface-hover);
+        }
+
+        tbody tr:last-child {
+            border-bottom: none;
+        }
+
+        td {
+            padding: 10px 14px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 280px;
+        }
+
+        /* ─── Status Badges ───────────────────────────── */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .badge-success  { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+        .badge-failed   { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+        .badge-partial  { background: rgba(251, 146, 60, 0.15);  color: var(--partial); }
+        .badge-loading  { background: rgba(129, 140, 248, 0.15); color: var(--loading); }
+        .badge-skipped  { background: rgba(139, 143, 163, 0.15); color: var(--text-muted); }
+
+        /* ─── Expandable Detail Row ───────────────────── */
+        .detail-row td {
+            padding: 0;
+            background: var(--bg);
+        }
+
+        .detail-content {
+            padding: 16px 20px;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+
+        .detail-content .detail-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px 32px;
+        }
+
+        .detail-content .detail-label {
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .detail-content .error-box {
+            margin-top: 12px;
+            padding: 12px;
+            background: rgba(248, 113, 113, 0.08);
+            border: 1px solid rgba(248, 113, 113, 0.2);
+            border-radius: 6px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            color: var(--danger);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .detail-content .errors-table {
+            margin-top: 12px;
+            width: 100%;
+            font-size: 12px;
+        }
+
+        .detail-content .errors-table th {
+            font-size: 10px;
+            padding: 6px 10px;
+            background: var(--surface);
+        }
+
+        .detail-content .errors-table td {
+            padding: 6px 10px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-width: none;
+        }
+
+        /* ─── Misc ────────────────────────────────────── */
+        .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
+        .num  { font-variant-numeric: tabular-nums; text-align: right; }
+        .muted { color: var(--text-muted); }
+
+        .empty-state {
+            text-align: center;
+            padding: 48px;
+            color: var(--text-muted);
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* ─── Responsive ──────────────────────────────── */
+        @media (max-width: 768px) {
+            header { padding: 12px 16px; }
+            main { padding: 16px; }
+            .health-grid { grid-template-columns: repeat(2, 1fr); }
+            td { padding: 8px 10px; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1><span>S3 &rarr; Snowflake</span> &nbsp;Pipeline Dashboard</h1>
+    <div class="header-meta">
+        <span class="refresh-dot"></span>
+        <span id="last-updated">Loading...</span>
+    </div>
+</header>
+
+<main>
+    <!-- Health Summary Cards -->
+    <div class="health-grid" id="health-cards">
+        <div class="health-card">
+            <div class="label">Loads Today</div>
+            <div class="value accent" id="h-total">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Success Rate</div>
+            <div class="value success" id="h-rate">--%</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Rows Loaded</div>
+            <div class="value" id="h-rows">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Avg Duration</div>
+            <div class="value" id="h-duration">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Succeeded</div>
+            <div class="value success" id="h-success">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Partial</div>
+            <div class="value warning" id="h-partial">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Failed</div>
+            <div class="value danger" id="h-failed">--</div>
+        </div>
+        <div class="health-card">
+            <div class="label">Total Errors</div>
+            <div class="value danger" id="h-errors">--</div>
+        </div>
+    </div>
+
+    <!-- Recent Loads Table -->
+    <div class="section-header">
+        <h2>Recent Loads</h2>
+        <span class="muted" style="font-size: 12px;">Last 50 loads &middot; click row for details</span>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Status</th>
+                    <th>Table</th>
+                    <th>Database</th>
+                    <th>Source File</th>
+                    <th>Mode</th>
+                    <th style="text-align:right">Rows</th>
+                    <th style="text-align:right">Errors</th>
+                    <th style="text-align:right">Duration</th>
+                    <th>Started</th>
+                </tr>
+            </thead>
+            <tbody id="loads-table">
+                <tr><td colspan="9" class="empty-state"><div class="spinner"></div> Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</main>
+
+<script>
+(function() {
+    const REFRESH_INTERVAL = 30000; // 30 seconds
+    let expandedRow = null;
+
+    // ─── Helpers ──────────────────────────────────────────
+    function formatNumber(n) {
+        if (n === null || n === undefined) return '--';
+        return Number(n).toLocaleString();
+    }
+
+    function formatDuration(sec) {
+        if (sec === null || sec === undefined) return '--';
+        sec = Number(sec);
+        if (sec < 60) return sec + 's';
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return m + 'm ' + s + 's';
+    }
+
+    function formatTime(iso) {
+        if (!iso) return '--';
+        const d = new Date(iso);
+        const now = new Date();
+        const today = now.toDateString();
+        const dateStr = d.toDateString();
+        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        if (dateStr === today) return time;
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+    }
+
+    function statusBadge(status) {
+        const s = (status || '').toUpperCase();
+        const cls = {
+            'SUCCESS': 'badge-success',
+            'PARTIAL': 'badge-partial',
+            'FAILED':  'badge-failed',
+            'LOADING': 'badge-loading',
+            'SKIPPED': 'badge-skipped',
+        }[s] || 'badge-skipped';
+        return '<span class="badge ' + cls + '">' + s + '</span>';
+    }
+
+    function fileName(path) {
+        if (!path) return '--';
+        const parts = path.split('/');
+        return parts[parts.length - 1];
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // ─── Health Summary ──────────────────────────────────
+    function loadHealth() {
+        fetch('/api/health-summary')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('h-total').textContent = formatNumber(data.TOTAL_LOADS);
+                document.getElementById('h-rate').textContent = (data.SUCCESS_RATE || 0) + '%';
+                document.getElementById('h-rows').textContent = formatNumber(data.TOTAL_ROWS_LOADED);
+                document.getElementById('h-duration').textContent = formatDuration(Math.round(data.AVG_DURATION || 0));
+                document.getElementById('h-success').textContent = formatNumber(data.SUCCESSES);
+                document.getElementById('h-partial').textContent = formatNumber(data.PARTIALS);
+                document.getElementById('h-failed').textContent = formatNumber(data.FAILURES);
+                document.getElementById('h-errors').textContent = formatNumber(data.TOTAL_ERRORS);
+
+                // Color the success rate
+                const rateEl = document.getElementById('h-rate');
+                const rate = data.SUCCESS_RATE || 0;
+                rateEl.className = 'value ' + (rate >= 95 ? 'success' : rate >= 80 ? 'warning' : 'danger');
+            })
+            .catch(err => console.error('Health fetch error:', err));
+    }
+
+    // ─── Recent Loads ────────────────────────────────────
+    function loadTable() {
+        fetch('/api/recent-loads')
+            .then(r => r.json())
+            .then(data => {
+                const tbody = document.getElementById('loads-table');
+                if (!data.length) {
+                    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No loads recorded yet.</td></tr>';
+                    return;
+                }
+
+                let html = '';
+                data.forEach((row, i) => {
+                    html += '<tr data-idx="' + i + '" data-load-id="' + escapeHtml(row.LOAD_ID) + '">';
+                    html += '<td>' + statusBadge(row.STATUS) + '</td>';
+                    html += '<td><strong>' + escapeHtml(row.TARGET_TABLE) + '</strong></td>';
+                    html += '<td class="muted">' + escapeHtml(row.TARGET_DATABASE) + '</td>';
+                    html += '<td class="mono" title="' + escapeHtml(row.S3_KEY) + '">' + escapeHtml(fileName(row.S3_KEY)) + '</td>';
+                    html += '<td class="muted">' + escapeHtml(row.LOAD_MODE) + '</td>';
+                    html += '<td class="num">' + formatNumber(row.ROWS_LOADED) + '</td>';
+                    html += '<td class="num">' + (row.ERRORS_SEEN > 0 ? '<span style="color:var(--danger)">' + formatNumber(row.ERRORS_SEEN) + '</span>' : '0') + '</td>';
+                    html += '<td class="num">' + formatDuration(row.DURATION_SECONDS) + '</td>';
+                    html += '<td class="muted">' + formatTime(row.STARTED_AT) + '</td>';
+                    html += '</tr>';
+                    // Hidden detail row
+                    html += '<tr class="detail-row" id="detail-' + i + '" style="display:none">';
+                    html += '<td colspan="9"><div class="detail-content" id="detail-content-' + i + '">Loading...</div></td>';
+                    html += '</tr>';
+                });
+
+                tbody.innerHTML = html;
+
+                // Store data for detail expansion
+                tbody._data = data;
+
+                // Click handlers
+                tbody.querySelectorAll('tr[data-idx]').forEach(tr => {
+                    tr.addEventListener('click', function() {
+                        const idx = this.dataset.idx;
+                        const detailRow = document.getElementById('detail-' + idx);
+                        if (expandedRow === detailRow) {
+                            detailRow.style.display = 'none';
+                            expandedRow = null;
+                            return;
+                        }
+                        if (expandedRow) expandedRow.style.display = 'none';
+                        detailRow.style.display = '';
+                        expandedRow = detailRow;
+                        renderDetail(idx, tbody._data[idx]);
+                    });
+                });
+            })
+            .catch(err => {
+                console.error('Loads fetch error:', err);
+                document.getElementById('loads-table').innerHTML =
+                    '<tr><td colspan="9" class="empty-state" style="color:var(--danger)">Failed to load data. Check Snowflake connection.</td></tr>';
+            });
+    }
+
+    // ─── Detail Expansion ────────────────────────────────
+    function renderDetail(idx, row) {
+        const container = document.getElementById('detail-content-' + idx);
+        let html = '<div class="detail-grid">';
+        html += '<div><span class="detail-label">Load ID</span><br><span class="mono">' + escapeHtml(row.LOAD_ID) + '</span></div>';
+        html += '<div><span class="detail-label">S3 Key</span><br><span class="mono">' + escapeHtml(row.S3_KEY) + '</span></div>';
+        html += '<div><span class="detail-label">Format</span><br>' + escapeHtml(row.FILE_FORMAT_USED || '--') + '</div>';
+        html += '<div><span class="detail-label">Table Created</span><br>' + (row.TABLE_CREATED ? 'Yes (auto-created)' : 'No') + '</div>';
+        html += '<div><span class="detail-label">Rows Parsed</span><br>' + formatNumber(row.ROWS_PARSED) + '</div>';
+        html += '<div><span class="detail-label">Completed</span><br>' + formatTime(row.COMPLETED_AT) + '</div>';
+        html += '</div>';
+
+        if (row.ERROR_MESSAGE) {
+            html += '<div class="error-box">' + escapeHtml(row.ERROR_MESSAGE) + '</div>';
+        }
+
+        container.innerHTML = html;
+
+        // Fetch rejected row details if there are errors
+        if (row.ERRORS_SEEN > 0) {
+            fetch('/api/load-errors/' + encodeURIComponent(row.LOAD_ID))
+                .then(r => r.json())
+                .then(errors => {
+                    if (!errors.length) return;
+                    let errHtml = '<h4 style="margin-top:16px;font-size:13px;font-weight:600;">Rejected Rows</h4>';
+                    errHtml += '<table class="errors-table"><thead><tr><th>Line</th><th>Error</th><th>Record Preview</th></tr></thead><tbody>';
+                    errors.forEach(e => {
+                        errHtml += '<tr>';
+                        errHtml += '<td>' + (e.ERROR_LINE || '--') + '</td>';
+                        errHtml += '<td>' + escapeHtml(e.ERROR_MESSAGE) + '</td>';
+                        errHtml += '<td>' + escapeHtml(e.REJECTED_RECORD_PREVIEW || '') + '</td>';
+                        errHtml += '</tr>';
+                    });
+                    errHtml += '</tbody></table>';
+                    container.innerHTML += errHtml;
+                })
+                .catch(() => {});
+        }
+    }
+
+    // ─── Init & Refresh ──────────────────────────────────
+    function refresh() {
+        loadHealth();
+        loadTable();
+        document.getElementById('last-updated').textContent =
+            'Updated ' + new Date().toLocaleTimeString();
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_INTERVAL);
+})();
+</script>
+
+</body>
+</html>

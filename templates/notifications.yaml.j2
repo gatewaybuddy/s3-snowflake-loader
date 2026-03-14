@@ -1,0 +1,41 @@
+{# ─────────────────────────────────────────────────────────────
+   S3 → Snowflake Loader: SNS Notifications Template
+   Parameterized Jinja2 template — rendered by generate.py
+
+   Creates per-database:
+     - SNS topic for pipeline notifications
+     - Email subscription (if configured)
+     - Lambda permission to publish to SNS
+   ───────────────────────────────────────────────────────────── #}
+
+{# ─── SNS Topics ──────────────────────────────────────────── #}
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set db_lower = db_name | lower | replace('_', '-') %}
+{%- set safe = db_name | replace('_', '') %}
+
+  # ─── {{ db_name }}: SNS Notification Topic ────────────────
+  NotificationTopic{{ safe }}:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: etl-notifications-{{ db_lower }}
+      DisplayName: 'ETL Pipeline - {{ db_name }}'
+{%- if tags %}
+      Tags:
+{%- for key, value in tags.items() %}
+        - Key: {{ key }}
+          Value: '{{ value }}'
+{%- endfor %}
+{%- endif %}
+
+{% if notifications is defined and notifications.email is defined and notifications.email %}
+  # ─── {{ db_name }}: Email Subscription ─────────────────────
+  EmailSubscription{{ safe }}:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationTopic{{ safe }}
+      Protocol: email
+      Endpoint: '{{ notifications.email }}'
+{% endif %}
+
+{% endfor %}

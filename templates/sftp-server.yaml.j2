@@ -1,0 +1,216 @@
+{# ─────────────────────────────────────────────────────────────
+   AWS Transfer Family SFTP Gateway
+   Parameterized Jinja2 template — rendered by generate.py
+
+   Creates:
+     - AWS Transfer Family SFTP server (public endpoint)
+     - IAM role for Transfer Family → S3 access
+     - IAM role for CloudWatch logging
+     - Per-user home directory mapping (analytics-upload → s3://bucket/analytics/)
+     - SSH key-based authentication (no passwords)
+   ───────────────────────────────────────────────────────────── #}
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  AWS Transfer Family SFTP server for S3-to-Snowflake ETL pipeline.
+  Provides managed SFTP endpoint for external file uploads.
+  Generated at {{ generated_at | default('(manual)') }}.
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: '{{ aws.s3_bucket }}'
+    Description: S3 bucket where SFTP users upload files
+  S3BucketArn:
+    Type: String
+    Default: 'arn:aws:s3:::{{ aws.s3_bucket }}'
+    Description: ARN of the S3 bucket
+  EndpointType:
+    Type: String
+    Default: PUBLIC
+    AllowedValues:
+      - PUBLIC
+      - VPC
+    Description: >-
+      PUBLIC for internet-accessible SFTP. VPC for private endpoint
+      (requires VpcId and SubnetIds parameters).
+  VpcId:
+    Type: String
+    Default: ''
+    Description: >-
+      (VPC endpoint only) VPC ID for the Transfer Family server.
+      Leave empty for PUBLIC endpoint.
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      (VPC endpoint only) Comma-separated subnet IDs.
+      Leave empty for PUBLIC endpoint.
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      (VPC endpoint only) Comma-separated security group IDs.
+      Leave empty for PUBLIC endpoint.
+  HostKeyBody:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) Custom RSA host key in PEM format. If empty, Transfer
+      Family generates one. Provide to keep a stable host key across
+      stack updates (avoids SSH known_hosts warnings).
+    NoEcho: true
+
+Conditions:
+  IsPublicEndpoint: !Equals [!Ref EndpointType, 'PUBLIC']
+  IsVpcEndpoint: !Not [!Equals [!Ref EndpointType, 'PUBLIC']]
+  HasHostKey: !Not [!Equals [!Ref HostKeyBody, '']]
+
+Resources:
+
+  # ─── CloudWatch Logging Role ──────────────────────────────────
+  # Transfer Family needs an IAM role to write CloudWatch Logs.
+  TransferLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {{ naming.lambda_prefix | default('etl') }}-sftp-logging-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sftp-cloudwatch-logging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/transfer/*'
+
+  # ─── SFTP Server ──────────────────────────────────────────────
+  SftpServer:
+    Type: AWS::Transfer::Server
+    Properties:
+      EndpointType: !Ref EndpointType
+      {% raw %}
+      # VPC endpoint details (ignored for PUBLIC)
+      EndpointDetails: !If
+        - IsVpcEndpoint
+        - VpcId: !Ref VpcId
+          SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: !Ref SecurityGroupIds
+        - !Ref 'AWS::NoValue'
+      {% endraw %}
+      IdentityProviderType: SERVICE_MANAGED
+      LoggingRole: !GetAtt TransferLoggingRole.Arn
+      Protocols:
+        - SFTP
+      SecurityPolicyName: TransferSecurityPolicy-2024-01
+{%- if tags %}
+      Tags:
+{%- for key, value in tags.items() %}
+        - Key: {{ key }}
+          Value: '{{ value }}'
+{%- endfor %}
+        - Key: Component
+          Value: sftp-gateway
+{%- endif %}
+
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set db_lower = db_name | lower | replace('_', '-') %}
+{%- set safe = db_name | replace('_', '') %}
+{%- set prefix = db.s3_prefix %}
+{%- set user_name = db.sftp_user | default('upload-' ~ db_lower) %}
+
+  # ─── {{ db_name }}: SFTP User S3 Access Role ───────────────────
+  SftpUserRole{{ safe }}:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {{ naming.lambda_prefix | default('etl') }}-sftp-{{ db_lower }}-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sftp-s3-{{ db_lower }}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allow listing the bucket (restricted to prefix by session policy)
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Ref S3BucketArn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - '{{ prefix }}*'
+              # Allow read/write within the user's prefix
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/{{ prefix }}*'
+
+  # ─── {{ db_name }}: SFTP User ─────────────────────────────────
+  # SSH public key must be added after stack creation using:
+  #   aws transfer import-ssh-public-key \
+  #     --server-id <server-id> \
+  #     --user-name {{ user_name }} \
+  #     --ssh-public-key-body "ssh-rsa AAAA..."
+  #
+  # Or use scripts/create_sftp_user.py for full provisioning.
+  SftpUser{{ safe }}:
+    Type: AWS::Transfer::User
+    Properties:
+      ServerId: !GetAtt SftpServer.ServerId
+      UserName: {{ user_name }}
+      Role: !GetAtt SftpUserRole{{ safe }}.Arn
+      HomeDirectoryType: LOGICAL
+      HomeDirectoryMappings:
+        - Entry: /
+          Target: /{{ '${S3BucketName}' }}/{{ prefix }}
+{%- if tags %}
+      Tags:
+{%- for key, value in tags.items() %}
+        - Key: {{ key }}
+          Value: '{{ value }}'
+{%- endfor %}
+{%- endif %}
+
+{% endfor %}
+
+Outputs:
+  SftpServerId:
+    Value: !GetAtt SftpServer.ServerId
+    Description: Transfer Family server ID
+    Export:
+      Name: !Sub '${AWS::StackName}-SftpServerId'
+  SftpEndpoint:
+    Value: !Sub '${SftpServer.ServerId}.server.transfer.${AWS::Region}.amazonaws.com'
+    Description: SFTP endpoint hostname
+    Export:
+      Name: !Sub '${AWS::StackName}-SftpEndpoint'
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set db_lower = db_name | lower | replace('_', '-') %}
+{%- set safe = db_name | replace('_', '') %}
+{%- set user_name = db.sftp_user | default('upload-' ~ db_lower) %}
+  SftpUser{{ safe }}Name:
+    Value: {{ user_name }}
+    Description: SFTP username for {{ db_name }} uploads
+{% endfor %}

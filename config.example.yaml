@@ -1,0 +1,91 @@
+# S3 → Snowflake Loader Configuration
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is gitignored — your credentials stay local.
+
+# ─── AWS Configuration ───────────────────────────────────────
+aws:
+  region: us-east-1
+  s3_bucket: my-data-lake          # Bucket where files land
+  # account_id is auto-detected from AWS CLI, or set explicitly:
+  # account_id: "123456789012"
+
+# ─── S3 Encryption ──────────────────────────────────────────
+# Controls server-side encryption on uploaded objects.
+# AES256 = SSE-S3 (default, free, no key management)
+# aws:kms = SSE-KMS (audit trail in CloudTrail, key rotation)
+encryption:
+  algorithm: AES256                # AES256 | aws:kms
+  # kms_key_id: ""                 # Required if algorithm is aws:kms
+                                   # e.g., arn:aws:kms:us-east-1:123456:key/abc-123
+
+# ─── SFTP Gateway ───────────────────────────────────────────
+# AWS Transfer Family configuration (optional).
+# Set enabled: true to include SFTP in generated artifacts.
+sftp:
+  enabled: false
+  key_type: rsa                    # rsa | ed25519
+  key_bits: 4096                   # Only used for rsa type
+
+# ─── Snowflake Configuration ────────────────────────────────
+snowflake:
+  account: xy12345.us-east-1       # Snowflake account identifier
+  warehouse: LOADING_WH            # Warehouse for loading operations
+  admin_database: ADMIN_DB         # Centralized pipeline metadata
+  admin_schema: _PIPELINE          # Schema within admin DB
+
+# ─── Database Mappings ──────────────────────────────────────
+# Each entry creates:
+#   - A Lambda function with its own IAM role
+#   - A Snowflake service user + role (isolated credentials)
+#   - A storage integration + external stage
+#   - S3 event notification filtered to the prefix
+#
+# Add as many databases as needed.
+databases:
+  - name: ANALYTICS_DB             # Snowflake database name
+    s3_prefix: analytics/          # S3 prefix that routes to this DB
+    schema: STAGING                # Target schema (created if not exists)
+    service_user: SVC_LOADER_ANALYTICS  # Snowflake service user name
+    role: DATA_LOADER_ANALYTICS    # Snowflake role name
+
+  - name: REPORTING_DB
+    s3_prefix: reporting/
+    schema: STAGING
+    service_user: SVC_LOADER_REPORTING
+    role: DATA_LOADER_REPORTING
+
+# ─── Lambda Configuration ───────────────────────────────────
+lambda:
+  runtime: python3.12
+  timeout: 900                     # 15 minutes max (Lambda limit)
+  memory_mb: 512                   # MB — increase for large files
+  # reserved_concurrency: 10       # Optional: limit concurrent loads
+
+# ─── Default File Format ────────────────────────────────────
+# Used when no control table override exists.
+# The loader auto-detects format from file extension + content,
+# but these defaults apply to ambiguous cases.
+defaults:
+  file_format: CSV
+  csv_skip_header: 1
+  csv_field_delimiter: ","
+  csv_field_optionally_enclosed_by: '"'
+  csv_null_if: ["NULL", "", "null", "\\N"]
+  on_error: CONTINUE               # CONTINUE | SKIP_FILE | ABORT_STATEMENT
+  purge: false                     # Never delete source files
+
+# ─── Naming Convention ──────────────────────────────────────
+# Controls how generated Snowflake objects are named.
+# Useful if your org has naming standards.
+naming:
+  integration_prefix: S3_INT       # Storage integration: S3_INT_ANALYTICS_DB
+  stage_name: S3_LOAD_STAGE        # Stage name within each DB schema
+  lambda_prefix: etl               # Lambda function: etl-analytics-loader
+
+# ─── Tags ───────────────────────────────────────────────────
+# Applied to all AWS resources for cost tracking / governance.
+tags:
+  Project: s3-snowflake-loader
+  Environment: production
+  # Team: data-engineering
+  # CostCenter: "12345"

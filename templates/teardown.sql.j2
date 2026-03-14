@@ -1,0 +1,60 @@
+{# ─────────────────────────────────────────────────────────────
+   S3 → Snowflake Loader: Teardown SQL
+   Parameterized Jinja2 template — rendered by generate.py
+
+   Removes ALL Snowflake objects created by the setup script.
+   Run as ACCOUNTADMIN. Review carefully before executing.
+   ───────────────────────────────────────────────────────────── #}
+-- =============================================================
+-- S3 → Snowflake Loader: TEARDOWN
+-- Generated for account: {{ snowflake.account }}
+-- Generated at: {{ generated_at | default('(manual)') }}
+--
+-- WARNING: This removes ALL objects created by the setup script.
+-- Run as ACCOUNTADMIN. Review carefully before executing.
+-- =============================================================
+
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set schema = db.schema | upper %}
+{%- set role = db.role %}
+{%- set user = db.service_user %}
+{%- set int_name = naming.integration_prefix ~ '_' ~ db_name %}
+{%- set stage_name = naming.stage_name %}
+-- ─── {{ db_name }} ───
+
+-- Revoke grants first (avoids dangling references)
+REVOKE USAGE ON STAGE {{ db_name }}.{{ schema }}.{{ stage_name }} FROM ROLE {{ role }};
+REVOKE CREATE STAGE ON SCHEMA {{ db_name }}.{{ schema }} FROM ROLE {{ role }};
+REVOKE ALL ON ALL TABLES IN SCHEMA {{ db_name }}.{{ schema }} FROM ROLE {{ role }};
+REVOKE ALL ON FUTURE TABLES IN SCHEMA {{ db_name }}.{{ schema }} FROM ROLE {{ role }};
+REVOKE USAGE ON SCHEMA {{ db_name }}.{{ schema }} FROM ROLE {{ role }};
+REVOKE USAGE ON DATABASE {{ db_name }} FROM ROLE {{ role }};
+REVOKE USAGE ON WAREHOUSE {{ snowflake.warehouse }} FROM ROLE {{ role }};
+
+-- Admin DB grant revocations
+REVOKE ALL ON ALL TABLES IN SCHEMA {{ snowflake.admin_database }}.{{ snowflake.admin_schema }} FROM ROLE {{ role }};
+REVOKE USAGE ON SCHEMA {{ snowflake.admin_database }}.{{ snowflake.admin_schema }} FROM ROLE {{ role }};
+REVOKE USAGE ON DATABASE {{ snowflake.admin_database }} FROM ROLE {{ role }};
+
+-- Drop objects
+DROP STAGE IF EXISTS {{ db_name }}.{{ schema }}.{{ stage_name }};
+DROP STORAGE INTEGRATION IF EXISTS {{ int_name }};
+DROP USER IF EXISTS {{ user }};
+DROP ROLE IF EXISTS {{ role }};
+-- DROP SCHEMA IF EXISTS {{ db_name }}.{{ schema }};  -- Uncomment to remove schema
+-- DROP DATABASE IF EXISTS {{ db_name }};              -- Uncomment to remove database
+
+{% endfor %}
+-- ─── Admin Database ───
+
+DROP TABLE IF EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.CONTROL_TABLE;
+DROP TABLE IF EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.NOTIFICATIONS;
+DROP TABLE IF EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.LOAD_ERRORS;
+DROP TABLE IF EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }}.LOAD_HISTORY;
+DROP SCHEMA IF EXISTS {{ snowflake.admin_database }}.{{ snowflake.admin_schema }};
+-- DROP DATABASE IF EXISTS {{ snowflake.admin_database }};  -- Uncomment to remove admin DB
+
+-- ─── Warehouse ───
+
+-- DROP WAREHOUSE IF EXISTS {{ snowflake.warehouse }};  -- Uncomment to remove warehouse

@@ -1,0 +1,38 @@
+# Configuration (contains credentials/account info)
+config.yaml
+
+# Generated output
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lambda packaging
+*.zip
+lambda/loader/package/
+
+# RSA keys (generated during setup)
+*.pem
+*.pub
+keys/
+
+# Dashboard credentials
+dashboard/.env

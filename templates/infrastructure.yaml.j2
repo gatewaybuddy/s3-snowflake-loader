@@ -1,0 +1,225 @@
+{# ─────────────────────────────────────────────────────────────
+   S3 → Snowflake Loader: CloudFormation Template
+   Parameterized Jinja2 template — rendered by generate.py
+
+   Creates per-database:
+     - Lambda execution IAM role
+     - Snowflake cross-account IAM role
+     - Secrets Manager secret
+     - Lambda function
+     - S3 invoke permission
+   ───────────────────────────────────────────────────────────── #}
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  S3 to Snowflake Automated Data Loader.
+  Generated at {{ generated_at | default('(manual)') }}.
+
+Parameters:
+  CodeBucketName:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  S3BucketName:
+    Type: String
+    Default: '{{ aws.s3_bucket }}'
+    Description: S3 bucket for data landing
+  S3BucketArn:
+    Type: String
+    Default: 'arn:aws:s3:::{{ aws.s3_bucket }}'
+    Description: ARN of the S3 bucket
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set safe = db_name | replace('_', '') %}
+{%- set int_name = naming.integration_prefix ~ '_' ~ db_name %}
+  SnowflakeIamArn{{ safe }}:
+    Type: String
+    Default: ''
+    Description: >-
+      STORAGE_AWS_IAM_USER_ARN from DESC INTEGRATION {{ int_name }}
+  SnowflakeExternalId{{ safe }}:
+    Type: String
+    Default: ''
+    Description: >-
+      STORAGE_AWS_EXTERNAL_ID from DESC INTEGRATION {{ int_name }}
+{% endfor %}
+
+Resources:
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set db_lower = db_name | lower | replace('_', '-') %}
+{%- set safe = db_name | replace('_', '') %}
+{%- set prefix = db.s3_prefix %}
+
+  # ─── {{ db_name }}: Lambda Execution Role ───────────────────
+  LambdaRole{{ safe }}:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {{ naming.lambda_prefix }}-{{ db_lower }}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: {{ naming.lambda_prefix }}-{{ db_lower }}-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/{{ prefix }}*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                Condition:
+                  StringLike:
+                    's3:prefix': '{{ prefix }}*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:etl/{{ db_name | lower }}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref NotificationTopic{{ safe }}
+
+  # ─── {{ db_name }}: Snowflake Cross-Account Role ────────────
+  SnowflakeRole{{ safe }}:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {{ naming.lambda_prefix }}-{{ db_lower }}-snowflake-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref SnowflakeIamArn{{ safe }}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref SnowflakeExternalId{{ safe }}
+      Policies:
+        - PolicyName: snowflake-s3-{{ db_lower }}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/{{ prefix }}*'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+
+  # ─── {{ db_name }}: Secrets Manager Secret ──────────────────
+  Secret{{ safe }}:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: etl/{{ db_name | lower }}/config
+      Description: Snowflake credentials for {{ db_name }} loader
+      SecretString: '{"snowflake_account": "PLACEHOLDER", "snowflake_user": "PLACEHOLDER"}'
+
+  # ─── {{ db_name }}: CloudWatch Log Group ───────────────────
+  LogGroup{{ safe }}:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/{{ naming.lambda_prefix }}-{{ db_lower }}-loader'
+      RetentionInDays: 30
+
+  # ─── {{ db_name }}: Lambda Function ─────────────────────────
+  LoaderFunction{{ safe }}:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: {{ naming.lambda_prefix }}-{{ db_lower }}-loader
+      Runtime: {{ lambda_config.runtime }}
+      Handler: handler.lambda_handler
+      Timeout: {{ lambda_config.timeout }}
+      MemorySize: {{ lambda_config.memory_mb }}
+      Role: !GetAtt LambdaRole{{ safe }}.Arn
+      Environment:
+        Variables:
+          SECRET_NAME: etl/{{ db_name | lower }}/config
+          S3_PREFIX: '{{ prefix }}'
+          LOG_LEVEL: INFO
+          SNS_TOPIC_ARN: !Ref NotificationTopic{{ safe }}
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: {{ naming.lambda_prefix }}-{{ db_lower }}-loader.zip
+{%- if tags %}
+      Tags:
+{%- for key, value in tags.items() %}
+        - Key: {{ key }}
+          Value: '{{ value }}'
+{%- endfor %}
+{%- endif %}
+
+  # ─── {{ db_name }}: S3 Invoke Permission ────────────────────
+  S3InvokePermission{{ safe }}:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LoaderFunction{{ safe }}
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Ref S3BucketArn
+
+  # ─── {{ db_name }}: SNS Notification Topic ────────────────
+  NotificationTopic{{ safe }}:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: {{ naming.lambda_prefix }}-notifications-{{ db_lower }}
+      DisplayName: 'ETL Pipeline - {{ db_name }}'
+      KmsMasterKeyId: alias/aws/sns
+{%- if tags %}
+      Tags:
+{%- for key, value in tags.items() %}
+        - Key: {{ key }}
+          Value: '{{ value }}'
+{%- endfor %}
+{%- endif %}
+
+{% if notifications is defined and notifications.email is defined and notifications.email %}
+  # ─── {{ db_name }}: Email Subscription ─────────────────────
+  EmailSubscription{{ safe }}:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationTopic{{ safe }}
+      Protocol: email
+      Endpoint: '{{ notifications.email }}'
+{% endif %}
+
+{% endfor %}
+  # ─── S3 Event Notifications ───────────────────────────────
+  # S3 bucket notification configuration must be added separately
+  # because the bucket likely already exists. Use the AWS CLI:
+  #
+  # aws s3api put-bucket-notification-configuration \
+  #   --bucket {{ aws.s3_bucket }} \
+  #   --notification-configuration file://s3-notifications.json
+
+Outputs:
+{% for db in databases %}
+{%- set db_name = db.name | upper %}
+{%- set safe = db_name | replace('_', '') %}
+  LoaderArn{{ safe }}:
+    Value: !GetAtt LoaderFunction{{ safe }}.Arn
+    Description: ARN of {{ db_name }} loader Lambda
+  SnowflakeRoleArn{{ safe }}:
+    Value: !GetAtt SnowflakeRole{{ safe }}.Arn
+    Description: >-
+      ARN for Snowflake storage integration {{ db_name }}.
+      Use in STORAGE_AWS_ROLE_ARN when creating the integration.
+  NotificationTopicArn{{ safe }}:
+    Value: !Ref NotificationTopic{{ safe }}
+    Description: SNS topic ARN for {{ db_name }} pipeline notifications
+{% endfor %}
