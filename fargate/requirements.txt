@@ -8,7 +8,7 @@ python-gnupg>=0.5.0,<0.6.0
 snowflake-connector-python>=3.5.0,<4.0.0
 
 # Cryptography for enhanced security
-cryptography>=41.0.0,<42.0.0
+cryptography>=46.0.6,<47.0.0
 
 # Standard library extras (usually included but explicit for clarity)
 # These are typically part of Python stdlib but listing for completeness
