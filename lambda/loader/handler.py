@@ -2,7 +2,7 @@
 Lambda handler for S3 → Snowflake data loading.
 
 Triggered by S3 ObjectCreated events. Each Lambda instance handles
-one database. The S3 prefix filter ensures only relevant files arrive.
+one database. The configurable S3 prefix filter ensures only relevant files arrive.
 
 Flow:
   1. Parse S3 event → extract bucket, key, size

@@ -10,11 +10,11 @@ Event-driven data loading pipeline. Drop files in S3, they land in Snowflake aut
 4. **Everything is logged** to a centralized admin database
 
 ```
-s3://bucket/analytics/CUSTOMERS.T/customers_2026.csv
-              │            │    │
-              │            │    └── Mode: T=Truncate, A=Append, M=Merge
-              │            └── Parent folder = target table name
-              └── Prefix maps to a specific database + Lambda
+s3://bucket/<prefix>/CUSTOMERS.T/customers_2026.csv
+              │          │    │
+              │          │    └── Mode: T=Truncate, A=Append, M=Merge
+              │          └── Parent folder = target table name
+              └── Configurable prefix maps to a specific database + Lambda
 ```
 
 ## Features
@@ -112,12 +112,14 @@ snowflake:
 
 databases:
   - name: ANALYTICS_DB
-    s3_prefix: analytics/
+    s3_prefix: analytics/    # Configurable per-deployment
     schema: STAGING
   - name: REPORTING_DB
-    s3_prefix: reporting/
+    s3_prefix: reporting/    # Can be any prefix you choose
     schema: STAGING
 ```
+
+**Important**: The `s3_prefix` determines which S3 path routes to which database and can be anything (e.g., `data/`, `snowflake/`, `warehouse/`, `my-org/`). Each deployment can use different prefixes based on your S3 organization scheme.
 
 ## Roadmap
 

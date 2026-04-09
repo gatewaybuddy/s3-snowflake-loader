@@ -58,8 +58,9 @@ def parse_s3_key(s3_key: str, prefix: str) -> ParsedPath:
     Parse an S3 key into routing information.
     
     Args:
-        s3_key: Full S3 object key (e.g., "analytics/reports/REVENUE.A/revenue_2026.csv")
-        prefix: The database prefix to strip (e.g., "analytics/")
+        s3_key: Full S3 object key (e.g., "analytics/reports/REVENUE.A/revenue_2026.csv", 
+                "data/warehouse/SALES.T/sales_data.csv", "snowflake/staging/ORDERS.A/orders.json")
+        prefix: The database prefix to strip (e.g., "analytics/", "data/", "snowflake/")
     
     Returns:
         ParsedPath with table name, mode, format, etc.

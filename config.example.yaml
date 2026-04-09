@@ -40,19 +40,28 @@ snowflake:
 #   - A storage integration + external stage
 #   - S3 event notification filtered to the prefix
 #
+# The s3_prefix is deployment-specific and can be anything.
+# It determines which S3 path routes to which database.
 # Add as many databases as needed.
 databases:
   - name: ANALYTICS_DB             # Snowflake database name
-    s3_prefix: analytics/          # S3 prefix that routes to this DB
+    s3_prefix: analytics/          # S3 prefix that routes to this DB (configurable)
     schema: STAGING                # Target schema (created if not exists)
     service_user: SVC_LOADER_ANALYTICS  # Snowflake service user name
     role: DATA_LOADER_ANALYTICS    # Snowflake role name
 
   - name: REPORTING_DB
-    s3_prefix: reporting/
+    s3_prefix: reporting/          # Different prefix for this database
     schema: STAGING
     service_user: SVC_LOADER_REPORTING
     role: DATA_LOADER_REPORTING
+
+  # Example with different prefix options:
+  # - name: DATA_WAREHOUSE_DB
+  #   s3_prefix: data/             # Could be "data/", "snowflake/", "warehouse/", etc.
+  #   schema: RAW_DATA
+  #   service_user: SVC_LOADER_DW
+  #   role: DATA_LOADER_DW
 
 # ─── Lambda Configuration ───────────────────────────────────
 lambda:
